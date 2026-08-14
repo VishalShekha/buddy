@@ -7,7 +7,7 @@ app = FaceAnalysis(name="buffalo_l", providers=["CUDAExecutionProvider"])
 app.prepare(ctx_id=0)
 known_embeddings = np.load("known_faces.npy")
 
-mqttc = mqtt.Client()
+mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 mqttc.connect("100.100.180.6", 1883)  # your Ubuntu server's Tailscale IP
 
 cap = cv2.VideoCapture(0)

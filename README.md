@@ -1,9 +1,11 @@
 # Multi-Agent Personal Assistant — Rookie-Friendly Build Guide
+
 ### Windows GPU laptop ("muscle") + Ubuntu laptop ("server")
 
 **Simplification that will save you a lot of pain:** don't try to run GPU workloads inside Docker on Windows (that means fighting WSL2 GPU passthrough as a first project). Instead:
-- **Windows laptop** runs two things *natively* (just Python, no Docker): Ollama, and the face-recognition script.
-- **Ubuntu laptop** runs *everything else* in Docker containers, since Docker on Linux is simple and GPU-free here.
+
+- **Windows laptop** runs two things _natively_ (just Python, no Docker): Ollama, and the face-recognition script.
+- **Ubuntu laptop** runs _everything else_ in Docker containers, since Docker on Linux is simple and GPU-free here.
 
 They talk to each other over Tailscale, which you already have set up.
 
@@ -29,42 +31,54 @@ We build it bottom-up, testing each piece before moving to the next. Don't skip 
 ## Part 1 — Set up the Ubuntu server
 
 ### 1.1 Update the system
+
 ```bash
 sudo apt update && sudo apt upgrade -y
 ```
 
 ### 1.2 Install Docker
+
 ```bash
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER
 ```
+
 Log out and back in (or `newgrp docker`) so the group change takes effect. Test:
+
 ```bash
 docker run hello-world
 ```
+
 You should see a "Hello from Docker!" message.
 
 ### 1.3 Install Docker Compose (bundled with modern Docker, but confirm)
+
 ```bash
 docker compose version
 ```
+
 If that fails: `sudo apt install docker-compose-plugin -y`
 
 ### 1.4 Install Python and Git
+
 ```bash
 sudo apt install python3 python3-venv python3-pip git -y
 ```
 
 ### 1.5 Find your Tailscale IP
+
 ```bash
 tailscale ip -4
 ```
+
 Write this number down (e.g. `100.101.1.2`). This is **your server's Tailscale IP** — you'll use it everywhere below. Call it `SERVER_IP` from now on.
 
 ### 1.6 Make a project folder
+
 ```bash
 mkdir -p ~/agent-stack && cd ~/agent-stack
 ```
+
 Everything on the server side lives under here.
 
 ---
@@ -72,47 +86,65 @@ Everything on the server side lives under here.
 ## Part 2 — Set up the Windows (muscle) laptop
 
 ### 2.1 Confirm your GPU driver
+
 Open **NVIDIA Control Panel** or run in PowerShell:
+
 ```powershell
 nvidia-smi
 ```
+
 If this shows your GPU and driver version, you're good. If not, install the latest driver from nvidia.com first.
 
 ### 2.2 Install Python
+
 Download Python 3.11 from python.org. **During install, check "Add python.exe to PATH."** Confirm in PowerShell:
+
 ```powershell
 python --version
 ```
 
 ### 2.3 Install Ollama (runs your local LLM)
+
 Download the Windows installer from ollama.com. After installing, open PowerShell:
+
 ```powershell
 ollama pull qwen2.5:14b
 ollama run qwen2.5:14b
 ```
+
 Type a test message, confirm you get a response, then type `/bye` to exit. Ollama automatically uses your GPU — no extra config needed.
 
 ### 2.4 Find your Tailscale IP
+
 Open Tailscale on Windows, or in PowerShell:
+
 ```powershell
 tailscale ip -4
 ```
+
 Write this down — call it `MUSCLE_IP`.
 
 ### 2.5 Test Ollama is reachable from the server
+
 Ollama needs to listen on your network, not just `localhost`. Set an environment variable (System Properties → Environment Variables → New):
+
 ```
 Name: OLLAMA_HOST
 Value: 0.0.0.0
 ```
+
 Restart Ollama (it runs as a background service — restart your machine or restart the "Ollama" service in Task Manager). Then, **from the Ubuntu server**, test:
+
 ```bash
 curl http://MUSCLE_IP:11434/api/tags
 ```
+
 (replace `MUSCLE_IP` with the real number). You should get back a JSON list of your models. **If this fails, stop and fix it before continuing** — everything downstream depends on this connection working.
 
 ### 2.6 Windows Firewall
+
 If the curl test above times out, Windows Firewall is probably blocking it. Allow port 11434:
+
 ```powershell
 New-NetFirewallRule -DisplayName "Ollama" -Direction Inbound -Protocol TCP -LocalPort 11434 -Action Allow
 ```
@@ -129,6 +161,7 @@ cd ~/agent-stack/mosquitto
 ```
 
 Create `config/mosquitto.conf`:
+
 ```
 listener 1883 0.0.0.0
 allow_anonymous true
@@ -137,6 +170,7 @@ persistence_location /mosquitto/data/
 ```
 
 Create `docker-compose.yml` in `~/agent-stack/mosquitto/`:
+
 ```yaml
 services:
   mosquitto:
@@ -150,11 +184,13 @@ services:
 ```
 
 Run it:
+
 ```bash
 docker compose up -d
 ```
 
 **Test it works** — open two terminals on the server:
+
 ```bash
 # terminal 1: install a test client and listen
 sudo apt install mosquitto-clients -y
@@ -163,6 +199,7 @@ mosquitto_sub -h localhost -t 'test/topic' -v
 # terminal 2: publish a message
 mosquitto_pub -h localhost -t 'test/topic' -m "hello world"
 ```
+
 You should see `hello world` appear in terminal 1. That confirms the broker works. Delete the test topic mentally — it's not persisted anywhere important.
 
 ---
@@ -179,6 +216,7 @@ pip install mcp apscheduler paho-mqtt
 ```
 
 Create `server.py`:
+
 ```python
 from mcp.server.fastmcp import FastMCP
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -215,11 +253,13 @@ if __name__ == "__main__":
 ```
 
 **Test it without any orchestrator yet**, using plain Python so you understand what's happening before adding MCP/LLM complexity:
+
 ```python
 # quick_test.py (separate file, same folder)
 import server
 print(server.add_reminder("test reminder", "2026-07-27T15:05:00"))  # set 1-2 min in the future
 ```
+
 Run it, then watch terminal 1 (your `mosquitto_sub` from Part 3) — a message should appear on `agent/reminders/due` at the scheduled time. **This is your first real milestone.**
 
 ---
@@ -238,9 +278,11 @@ Sign up for a free **Brave Search API** key (or SerpAPI) — don't scrape Google
 ```bash
 export BRAVE_API_KEY="your-key-here"
 ```
+
 (Add this to `~/.bashrc` so it persists across reboots.)
 
 `server.py`:
+
 ```python
 from mcp.server.fastmcp import FastMCP
 import requests, os
@@ -262,6 +304,7 @@ def web_search(query: str) -> list:
 if __name__ == "__main__":
     mcp.run(transport="stdio")
 ```
+
 Test the same way — a quick script that imports `server` and calls `web_search("test query")` directly, confirming you get real results back before wiring it into anything bigger.
 
 ---
@@ -276,6 +319,7 @@ pip install mcp chromadb sentence-transformers
 ```
 
 `memory.py`:
+
 ```python
 import chromadb
 from sentence_transformers import SentenceTransformer
@@ -295,6 +339,7 @@ def query_memory(text: str, n: int = 5):
 ```
 
 `server.py`:
+
 ```python
 from mcp.server.fastmcp import FastMCP
 from memory import add_memory, query_memory
@@ -316,6 +361,7 @@ def recall(question: str) -> list:
 if __name__ == "__main__":
     mcp.run(transport="stdio")
 ```
+
 Test: store a couple of facts (`remember("My dentist appointment is Aug 3rd")`), then call `recall("when is my dentist appointment")` and confirm it comes back. This is your RAG pipeline — small, but real. Calendar integration (Google Calendar API) can be added later as another `@mcp.tool()` once this baseline works.
 
 ---
@@ -332,6 +378,7 @@ pip install fastapi uvicorn requests paho-mqtt python-dotenv
 ```
 
 `main.py`:
+
 ```python
 from fastapi import FastAPI
 import paho.mqtt.client as mqtt
@@ -368,14 +415,21 @@ def start_mqtt_listener():
 
 threading.Thread(target=start_mqtt_listener, daemon=True).start()
 ```
+
 Run it:
+
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000
+/etc/systemd/system/myapi.service
+sudo systemctl status myapi
 ```
+
 Test from any machine on your tailnet:
+
 ```bash
 curl "http://SERVER_IP:8000/ask?q=say+hello+in+one+sentence"
 ```
+
 You should get a JSON response with the LLM's answer, proving the full round-trip (server → Windows Ollama → back) works.
 
 At this stage, connecting the orchestrator to the search/reminders/assistant MCP agents as callable tools is the next natural step (a "router" that decides, based on the question, which MCP tool to call before asking the LLM to compose a final answer) — but get the basic loop above solid first.
@@ -385,11 +439,13 @@ At this stage, connecting the orchestrator to the search/reminders/assistant MCP
 ## Part 8 — Face recognition (Windows laptop, native — uses the GPU)
 
 On the Windows laptop:
+
 ```powershell
 pip install opencv-python insightface onnxruntime-gpu paho-mqtt numpy
 ```
 
 First, build a reference file of known faces. `enroll.py`:
+
 ```python
 import cv2
 from insightface.app import FaceAnalysis
@@ -410,9 +466,11 @@ for path in glob.glob("reference_photos/*.jpg"):
 np.save("known_faces.npy", np.array(embeddings))
 print(f"Enrolled {len(embeddings)} reference faces.")
 ```
+
 Run this once after dropping 3-5 photos of yourself into `reference_photos/`.
 
 `watch.py`:
+
 ```python
 import cv2, json, time
 import paho.mqtt.client as mqtt
@@ -441,6 +499,7 @@ while True:
             print("Unknown face detected — event published")
     time.sleep(1)
 ```
+
 Run `python watch.py`, then sit in front of the webcam (known face → nothing happens) and then have someone else step in front of it, or hold up a photo of a stranger (unknown face → check terminal 1's `mosquitto_sub` on the server for the event).
 
 ---
@@ -450,6 +509,7 @@ Run `python watch.py`, then sit in front of the webcam (known face → nothing h
 Simplest option: **ntfy**, self-hosted on the server.
 
 `~/agent-stack/ntfy/docker-compose.yml`:
+
 ```yaml
 services:
   ntfy:
@@ -459,10 +519,13 @@ services:
       - "8080:80"
     restart: unless-stopped
 ```
+
 ```bash
 docker compose up -d
 ```
+
 Install the **ntfy** app on your phone, subscribe to a topic (e.g. `myhouse-alerts`) pointing at `http://SERVER_IP:8080`. Then in the orchestrator's `on_mqtt_message`:
+
 ```python
 import requests
 def on_mqtt_message(client, userdata, msg):
@@ -472,6 +535,7 @@ def on_mqtt_message(client, userdata, msg):
         payload = msg.payload.decode()
         requests.post("http://localhost:8080/myhouse-alerts", data=f"Reminder: {payload}")
 ```
+
 Test end to end: trigger an unknown face on the Windows laptop → confirm a push notification arrives on your phone within a couple seconds.
 
 ---
@@ -482,7 +546,9 @@ Test end to end: trigger an unknown face on the Windows laptop → confirm a pus
 cd ~/agent-stack
 mkdir gitea && cd gitea
 ```
+
 `docker-compose.yml`:
+
 ```yaml
 services:
   gitea:
@@ -494,10 +560,13 @@ services:
       - ./data:/data
     restart: unless-stopped
 ```
+
 ```bash
 docker compose up -d
 ```
+
 Visit `http://SERVER_IP:3000` in a browser, run through the first-time setup wizard, create an account, create a repo. Push your `agent-stack` folder there:
+
 ```bash
 cd ~/agent-stack
 git init
@@ -506,6 +575,7 @@ git add .
 git commit -m "initial commit"
 git push -u origin main
 ```
+
 Later, mirror this same repo to GitHub (Gitea has a built-in "Mirror" push option in repo settings) so it's visible publicly on your resume/portfolio without exposing your home server.
 
 Deployment (CloudFront/S3, dashboards, etc.) — parking that for later as you said. Everything above already gives you a genuinely complete, demoable system without it.

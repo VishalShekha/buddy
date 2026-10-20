@@ -28,6 +28,111 @@ We build it bottom-up, testing each piece before moving to the next. Don't skip 
 
 ---
 
+## Quick start: how to run this project
+
+Use this when you want to bring the system up locally after the repo is on your machine.
+
+### 1) Start the core infrastructure
+
+On the Ubuntu/server machine:
+
+```bash
+cd ~/agent-stack
+cd mosquitto && docker compose up -d
+cd ../ntfy && docker compose up -d
+```
+
+This starts the message broker and push notification service.
+
+### 2) Install Python dependencies
+
+Create and activate a virtual environment, then install the packages used by the agents and API:
+
+```bash
+cd ~/agent-stack
+python3 -m venv .venv
+source .venv/bin/activate
+pip install fastapi uvicorn mcp paho-mqtt requests apscheduler
+```
+
+If you are running the Windows face-recognition script, install its extra dependencies there too:
+
+```powershell
+pip install opencv-python insightface numpy paho-mqtt
+```
+
+### 3) Start the agent services
+
+Run each agent in its own terminal from the repo root:
+
+```bash
+cd ~/agent-stack/Brain/assistant_agent
+python server.py
+```
+
+```bash
+cd ~/agent-stack/Brain/reminders_agent
+python server.py
+```
+
+```bash
+cd ~/agent-stack/Brain/search_agent
+python server.py
+```
+
+### 4) Start the orchestrator API
+
+```bash
+cd ~/agent-stack/Brain/orchestrator
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Then test it:
+
+```bash
+curl "http://localhost:8000/ask?q=hello"
+```
+
+### 5) Run the Windows face-recognition worker
+
+On the Windows laptop, update the Tailscale IPs in:
+
+- `Brain/orchestrator/main.py`
+- `Muscle/watch.py`
+
+Then run:
+
+```powershell
+cd path\to\buddy
+python Muscle\watch.py
+```
+
+This publishes `agent/facerecog/unknown_detected` events to your Mosquitto broker.
+
+### 6) Optional audio relay
+
+If you want the sound path enabled:
+
+- On the Ubuntu machine run:
+
+```bash
+cd ~/agent-stack/sound
+python reciever.py
+```
+
+- On the Windows machine run:
+
+```powershell
+cd path\to\buddy\sound
+python sender.py
+```
+
+This sends live audio from the Windows machine to the Ubuntu server.
+
+> Important: the hard-coded IP addresses in `Brain/orchestrator/main.py` and `Muscle/watch.py` must match your Tailscale network before the system will work end-to-end.
+
+---
+
 ## Part 1 — Set up the Ubuntu server
 
 ### 1.1 Update the system

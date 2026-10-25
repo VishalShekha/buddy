@@ -2,3 +2,5 @@ venv/
 __pycache__
 reference_photos
 known_faces.npy
+/Brain/assistant_agent/chroma_data/
+/Brain/mosquitto/data/

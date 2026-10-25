@@ -1,17 +1,23 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.shared.exceptions import McpError
 import paho.mqtt.client as mqtt
 import requests
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 BRAIN_DIR = Path(__file__).resolve().parents[1]
 MCP_SERVERS = {
@@ -63,16 +69,37 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 
 
 def ollama_chat(messages, tools):
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "tools": tools,
+        "stream": False,
+    }
+
     response = requests.post(
         OLLAMA_URL,
-        json={"model": MODEL, "messages": messages, "tools": tools, "stream": False},
+        json=payload,
         timeout=180,
     )
+
+    if not response.ok:
+        print(f"Ollama HTTP status: {response.status_code}")
+        print(f"Ollama response body: {response.text}")
+        print(f"Model: {MODEL}")
+        print(f"Number of tools: {len(tools)}")
+
     response.raise_for_status()
     return response.json()["message"]
+
 
 
 def tool_result_text(result):
@@ -88,15 +115,37 @@ def tool_result_text(result):
     )
 
 
-async def answer_with_tools(q, tools, tool_sessions):
-    tools_used = []
+def requested_memory_fact(q):
+    match = re.match(
+        r"^\s*(?:please\s+)?(?:remember|save|store|note)\s+(?:that\s+)?(.+?)\s*[.!?]*\s*$",
+        q,
+        re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else None
+
+
+async def call_memory_tool(tool_name, arguments, tool_sessions):
+    entry = tool_sessions.get(f"assistant_{tool_name}")
+    if entry is None:
+        raise RuntimeError(f"The assistant MCP server does not provide {tool_name}")
+    session, mcp_tool_name = entry
+    result = await session.call_tool(mcp_tool_name, arguments=arguments)
+    return tool_result_text(result)
+
+
+async def answer_with_tools(q, tools, tool_sessions, saved_memories):
+    tools_used = ["assistant_recall"]
     messages = [
         {
             "role": "system",
             "content": (
                 "You are a helpful personal assistant. Use the available MCP tools "
                 "whenever they can help answer or fulfill the user's request. "
-                "Call the appropriate tool before claiming an action is complete."
+                "Call the appropriate tool before claiming an action is complete. "
+                "Use the saved memories retrieved for this request when relevant. "
+                "If they do not contain the answer, say you do not know rather than "
+                "inventing personal information.\n\n"
+                f"Saved memories retrieved via MCP:\n{saved_memories}"
             ),
         },
         {"role": "user", "content": q},
@@ -130,11 +179,25 @@ async def answer_with_tools(q, tools, tool_sessions):
 async def ask(q: str):
     try:
         async with app.state.mcp_lock:
+            fact = requested_memory_fact(q)
+            if fact:
+                await call_memory_tool(
+                    "remember", {"fact": fact}, app.state.tool_sessions
+                )
+                return {
+                    "answer": f"I'll remember that: {fact}",
+                    "tools_used": ["assistant_remember"],
+                }
+
+            saved_memories = await call_memory_tool(
+                "recall", {"question": q}, app.state.tool_sessions
+            )
             answer, tools_used = await answer_with_tools(
-                q, app.state.mcp_tools, app.state.tool_sessions
+                q, app.state.mcp_tools, app.state.tool_sessions, saved_memories
             )
         return {"answer": answer, "tools_used": tools_used}
     except (McpError, requests.RequestException, KeyError, RuntimeError) as exc:
+        logger.exception("Failed to process /ask request: %s", q)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 

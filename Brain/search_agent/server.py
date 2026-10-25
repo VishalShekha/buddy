@@ -4,7 +4,7 @@ import os
 
 mcp = FastMCP("web_search")
 
-API_KEY = "55d27ca6532a2f6d17e2ee78b8e1bcb500b0d498791365ff9d29fbe20bd55ba2"
+API_KEY = ""
 
 @mcp.tool()
 def web_search(query: str) -> list:

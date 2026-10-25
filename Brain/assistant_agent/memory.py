@@ -13,3 +13,4 @@ def query_memory(text: str, n: int = 5):
     emb = embedder.encode([text])[0].tolist()
     res = collection.query(query_embeddings=[emb], n_results=n)
     return res["documents"][0]
+

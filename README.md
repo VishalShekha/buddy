@@ -52,7 +52,7 @@ Create and activate a virtual environment, then install the packages used by the
 cd ~/agent-stack
 python3 -m venv .venv
 source .venv/bin/activate
-pip install fastapi uvicorn mcp paho-mqtt requests apscheduler
+python -m pip install fastapi uvicorn "mcp<2" paho-mqtt requests apscheduler chromadb sentence-transformers
 ```
 
 If you are running the Windows face-recognition script, install its extra dependencies there too:
@@ -61,24 +61,16 @@ If you are running the Windows face-recognition script, install its extra depend
 pip install opencv-python insightface numpy paho-mqtt
 ```
 
-### 3) Start the agent services
+### 3) Configure web search
 
-Run each agent in its own terminal from the repo root:
-
-```bash
-cd ~/agent-stack/Brain/assistant_agent
-python server.py
-```
+The orchestrator starts the MCP agent servers automatically. Set the SerpAPI key
+in the same terminal before starting it; this is required by the web-search agent:
 
 ```bash
-cd ~/agent-stack/Brain/reminders_agent
-python server.py
+export SERPAPI_API_KEY="your-serpapi-key"
 ```
 
-```bash
-cd ~/agent-stack/Brain/search_agent
-python server.py
-```
+Keep the key private and do not commit it to the repository.
 
 ### 4) Start the orchestrator API
 
@@ -87,10 +79,19 @@ cd ~/agent-stack/Brain/orchestrator
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-Then test it:
+The orchestrator starts the assistant, reminders, and web-search MCP servers and
+lets Ollama choose and call their tools for each question. Test a memory write and
+recall:
 
 ```bash
-curl "http://localhost:8000/ask?q=hello"
+curl -G "http://localhost:8000/ask" --data-urlencode "q=Remember that my favorite color is blue"
+curl -G "http://localhost:8000/ask" --data-urlencode "q=What is my favorite color?"
+```
+
+For web search, ask naturally, for example:
+
+```bash
+curl -G "http://localhost:8000/ask" --data-urlencode "q=Search the web for today's top technology news"
 ```
 
 ### 5) Run the Windows face-recognition worker
@@ -473,71 +474,32 @@ Test: store a couple of facts (`remember("My dentist appointment is Aug 3rd")`),
 
 ## Part 7 — The orchestrator (server)
 
-This is the piece that ties everything together: it takes a request, decides which agent(s) to call, asks the LLM (on the Windows muscle laptop) to reason about it, and returns an answer. It also listens on MQTT for system-triggered events (like an unknown face).
+This is the piece that ties everything together: it starts the assistant,
+reminders, and web-search MCP servers over stdio, discovers their tools, and
+provides those tools to Ollama on the Windows muscle laptop. The model can then
+choose and call tools—such as remembering a fact, recalling it, searching the
+web, or scheduling a reminder—before composing its answer. It also listens on
+MQTT for system-triggered events (like an unknown face).
+
+The runnable implementation is `Brain/orchestrator/main.py`. Install the
+dependencies from the quick-start section, set `SERPAPI_API_KEY` as shown above,
+then start it:
 
 ```bash
-cd ~/agent-stack
-mkdir orchestrator && cd orchestrator
-python3 -m venv venv && source venv/bin/activate
-pip install fastapi uvicorn requests paho-mqtt python-dotenv
-```
-
-`main.py`:
-
-```python
-from fastapi import FastAPI
-import paho.mqtt.client as mqtt
-import requests, threading
-
-app = FastAPI()
-MUSCLE_IP = "MUSCLE_IP"  # replace with your Windows laptop's Tailscale IP
-
-def call_llm(prompt: str) -> str:
-    r = requests.post(
-        f"http://{MUSCLE_IP}:11434/api/generate",
-        json={"model": "qwen2.5:14b", "prompt": prompt, "stream": False},
-    )
-    return r.json()["response"]
-
-@app.get("/ask")
-def ask(q: str):
-    answer = call_llm(q)
-    return {"answer": answer}
-
-def on_mqtt_message(client, userdata, msg):
-    print(f"[event] {msg.topic}: {msg.payload.decode()}")
-    if msg.topic == "agent/facerecog/unknown_detected":
-        pass  # hook up your notification logic here (Part 9)
-    if msg.topic == "agent/reminders/due":
-        pass  # push a notification (Part 9)
-
-def start_mqtt_listener():
-    c = mqtt.Client()
-    c.connect("localhost", 1883)
-    c.subscribe("agent/#")
-    c.on_message = on_mqtt_message
-    c.loop_forever()
-
-threading.Thread(target=start_mqtt_listener, daemon=True).start()
-```
-
-Run it:
-
-```bash
+cd ~/agent-stack/Brain/orchestrator
 uvicorn main:app --host 0.0.0.0 --port 8000
-/etc/systemd/system/myapi.service
-sudo systemctl status myapi
 ```
 
-Test from any machine on your tailnet:
+Test MCP tool usage from any machine on your tailnet:
 
 ```bash
-curl "http://SERVER_IP:8000/ask?q=say+hello+in+one+sentence"
+curl -G "http://SERVER_IP:8000/ask" --data-urlencode "q=Remember that my favorite color is blue"
+curl -G "http://SERVER_IP:8000/ask" --data-urlencode "q=What is my favorite color?"
 ```
 
-You should get a JSON response with the LLM's answer, proving the full round-trip (server → Windows Ollama → back) works.
-
-At this stage, connecting the orchestrator to the search/reminders/assistant MCP agents as callable tools is the next natural step (a "router" that decides, based on the question, which MCP tool to call before asking the LLM to compose a final answer) — but get the basic loop above solid first.
+The first request should invoke the assistant MCP server's `remember` tool; the
+second should invoke `recall`. The JSON response includes the answer and a
+`tools_used` list so you can confirm which MCP tools the model called.
 
 ---
 
